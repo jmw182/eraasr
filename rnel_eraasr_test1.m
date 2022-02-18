@@ -4,41 +4,58 @@
 % stim times in stimTensor
 % ~20 biphasic pulses at different frequencies per set (20, 50, 100, 300 Hz)
 
-data_dir = 'C:\Data\StimRecordCableTest\ERAASR';
-set = 3; % 3, 4, 5, 6
+% input set number
+%set = 3; % 3, 4, 5, 6
+for set = 3 %[3 4 5 6]
+iter = 1; % for multiple iterations of output files
+
+% input data directory and filename
+data_dir = 'D:\StimRecordTest\2022_02_15_data_for_eraasr';
 fname = sprintf('Set%d_tensor_ERAASR.mat', set);
+
+% output directory and filename
+data_out_dir = 'D:\git\eraasr\data_out';
+data_out_fname = sprintf('Set%d_Iter%d_eraasr_output.mat', set, iter);
+
+% load input data
 load(fullfile(data_dir, fname)); % loads set_tensor, stim_tensor
 
 %% Setup ERAASR Parameters
 
 opts = ERAASR.Parameters();
-opts.Fs = 30000; % samples per second
+opts.Fs = 30000; % samples per second (Hz)
 Fms = opts.Fs / 1000; % multiply to convert ms to samples
 
-opts.thresholdHPCornerHz = 250;
-opts.thresholdChannel = 16;
-opts.thresholdValue = -2000;
+% thresholding to detect stim
+opts.thresholdChannel = 16; % threshold which channel
+opts.thresholdValue = -2000; % threshold channel at this value to find approximate start 
+opts.thresholdHPCornerHz = 250; % High pass filter at this corner frequency before thresholding
 
+% For alignment
 opts.alignChannel = 1;
-opts.alignUpsampleBy = 10;
+opts.alignUpsampleBy = 10; % supersample by this ratio before alignment
 opts.alignWindowPre = Fms * 0.5;
 opts.alignWindowDuration = Fms * 12;%double(range(stim_tensor,'all')) + (Fms*10); %Fms * 12;
 
-% 60 ms stim, align using 20 ms pre start to 110 post
-opts.extractWindowPre = Fms * 20; %double(stim_tensor(1,1) - Fms*20); %Fms * 20;
-opts.extractWindowDuration = double(range(stim_tensor,'all')) + (Fms*200); %Fms * 100;
-opts.cleanStartSamplesPreThreshold = Fms * 0.5;
+% For Cleaning
+opts.extractWindowPre = Fms * 20; %double(stim_tensor(1,1) - Fms*20); %Fms * 20; % number of samples to extract before the threshold crossing, should be sufficient to allow HP filtering 
+opts.extractWindowDuration = double(range(stim_tensor,'all')) + (Fms*200); %Fms * 100; % total number of samples to extract, which includes the pre, during stim, and post stim windows
+opts.cleanStartSamplesPreThreshold = Fms * 0.5; % number of samples before threshold crossing to include within the first pulse
         
 opts.cleanHPCornerHz = 10; % light high pass filtering at the start of cleaning
 opts.cleanHPOrder = 4; % high pass filter order 
 opts.cleanUpsampleBy = 1; % upsample by this ratio during cleaning
-opts.samplesPerPulse = Fms * 0.7; %Fms * 3; % 3 ms pulses
-opts.nPulses = size(stim_tensor,2); %20;
+opts.samplesPerPulse = Fms * 0.7; % duration of stim pulse
+opts.nPulses = size(stim_tensor,2); % number of pulses per trial
 
+% number of principal components for cleaning
 opts.nPC_channels = 12;
 opts.nPC_trials = 2;
 opts.nPC_pulses = 6;
 
+% when reconstructing each, omit this number of *TOTAL*
+% channels/trials/pulses, including the one being reconstructed. 
+% So 3 means omit me and my immediate neighbors
 opts.omit_bandwidth_channels = 3;
 opts.omit_bandwidth_trials = 1;
 opts.omit_bandwidth_pulses = 1;
@@ -59,6 +76,8 @@ opts.figurePath = pwd; % folder to save the figures
 opts.saveFigures = false; % whether to save the figures
 opts.saveFigureCommand = @(filepath) print('-dpng', '-r300', [filepath '.png']); % specify a custom command to save the figure
 
+opts.quiet = false; % if true, don't print anything
+
 %% Do alignment and cleaning procedure
 
 [dataCleaned, extract] = ERAASR.cleanTrials(set_tensor, opts);
@@ -70,11 +89,11 @@ plot(squeeze(dataCleaned(1, :, :)));
 box off;
 
 %% Apply blanking before filtering
-applyBlanking = true;
-if applyBlanking
-    method = 'linear_ramp';
-    blank_samples = 50;
-    dataBlanked = ERAASR.RNEL.apply_blanking(dataCleaned, stim_tensor, 'blank_samples', blank_samples, 'method', method);
+blank_opts.applyBlanking = true;
+if blank_opts.applyBlanking
+    blank_opts.method = 'linear_ramp';
+    blank_opts.blank_samples = 50;
+    dataBlanked = ERAASR.RNEL.apply_blanking(dataCleaned, stim_tensor, 'blank_samples', blank_opts.blank_samples, 'method', blank_opts.method);
 else
     dataBlanked = dataCleaned;
 end
@@ -85,28 +104,37 @@ end
 % identically from this point forward
 
 %% High pass filter the cleaned data
-
-dataCleanedHP = ERAASR.highPassFilter(dataBlanked, opts.Fs, 'cornerHz', 750, 'order', 1, ...
-    'subtractFirstSample', true, 'filtfilt', false, 'showProgress', true);
+filt.cornerHP = 750;
+filt.order = 1;
+filt.filtfilt = false;
+dataCleanedHP = ERAASR.highPassFilter(dataBlanked, opts.Fs, 'cornerHz', filt.cornerHP, 'order', filt.order, ...
+    'subtractFirstSample', true, 'filtfilt', filt.filtfilt, 'showProgress', true);
         
 %% Spike thresholding and waveform extraction
 
-rmsThresh = -4.5 * ERAASR.computeRMS(dataCleanedHP, 'perTrial', false, 'clip', 60); % clip samples that sink outside +/- 60 uV
+spikes.rmsThresh = -4.5 * ERAASR.computeRMS(dataCleanedHP, 'perTrial', false, 'clip', 60); % clip samples that sink outside +/- 60 uV
 
 waveSamplesPrePost = [10 38];
-[spikeTimes, waveforms] = ERAASR.extractSpikesCrossingThreshold(dataCleanedHP, rmsThresh, ...
+[spikes.spikeTimes, spikes.waveforms] = ERAASR.extractSpikesCrossingThreshold(dataCleanedHP, spikes.rmsThresh, ...
     'mode', 'largestFirst', 'waveformSamplesPrePost', waveSamplesPrePost, 'lockoutPrePost', [9 30]);
 
 %% Plot the mean spike waveforms
 % Note that this will include some spikes outside of the stimulation period as is
 
-nChannels = size(waveforms, 2);
+nChannels = size(spikes.waveforms, 2);
 nSamples = sum(waveSamplesPrePost);
-waveformMeans = nan(nSamples, nChannels);
+spikes.waveformMeans = nan(nSamples, nChannels);
 for iC = 1:nChannels
-    waveformMeans(:, iC) = mean(cat(1, waveforms{:, iC}), 1);
+    spikes.waveformMeans(:, iC) = mean(cat(1, spikes.waveforms{:, iC}), 1);
 end
 
 figure();
-plot(waveformMeans);
+plot(spikes.waveformMeans);
 box off;
+
+%% save data
+out_path = fullfile(data_out_dir, data_out_fname);
+out_vars = {'dataBlanked', 'dataCleaned', 'dataCleanedHP', 'spikes', 'opts', 'blank_opts', 'filt', 'extract', 'set', 'iter'};
+save(out_path, out_vars{:}, '-v7.3');
+
+end % set loop
